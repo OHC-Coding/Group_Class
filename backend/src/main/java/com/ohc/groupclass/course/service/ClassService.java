@@ -21,6 +21,7 @@ import com.ohc.groupclass.course.mapper.ClassInfoMapper;
 import com.ohc.groupclass.course.mapper.ClassSessionMapper;
 import com.ohc.groupclass.course.mapper.CourseTemplateMapper;
 import com.ohc.groupclass.course.mapper.VenueMapper;
+import com.ohc.groupclass.enrollment.service.StockService;
 import com.ohc.groupclass.user.entity.SysUser;
 import com.ohc.groupclass.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
@@ -62,6 +63,7 @@ public class ClassService {
     private final CoachProfileMapper coachProfileMapper;
     private final SysUserMapper sysUserMapper;
     private final ClassStatusService classStatusService;
+    private final StockService stockService;
 
     public List<ClassVO> list(String status, String keyword) {
         LambdaQueryWrapper<ClassInfo> query = Wrappers.lambdaQuery();
@@ -184,6 +186,7 @@ public class ClassService {
             throw new BusinessException(ResultCode.BAD_REQUEST, "报名截止时间已过，请先调整报名时间");
         }
         classStatusService.transition(id, ClassStatus.OPEN);
+        stockService.rebuild(id);
         return getById(id);
     }
 

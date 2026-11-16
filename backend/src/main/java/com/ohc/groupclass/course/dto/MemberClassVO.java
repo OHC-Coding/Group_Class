@@ -35,6 +35,8 @@ public class MemberClassVO {
 
     private Integer capacity;
 
+    private Integer remaining;
+
     private BigDecimal price;
 
     private LocalDateTime enrollOpenTime;

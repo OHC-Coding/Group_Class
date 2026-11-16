@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.ohc.groupclass.coach.entity.CoachProfile;
 import com.ohc.groupclass.coach.mapper.CoachProfileMapper;
+import com.ohc.groupclass.common.BusinessException;
+import com.ohc.groupclass.common.ResultCode;
 import com.ohc.groupclass.course.dto.MemberClassVO;
 import com.ohc.groupclass.course.dto.MemberSessionVO;
 import com.ohc.groupclass.course.entity.ClassInfo;
@@ -15,12 +17,15 @@ import com.ohc.groupclass.course.mapper.ClassInfoMapper;
 import com.ohc.groupclass.course.mapper.ClassSessionMapper;
 import com.ohc.groupclass.course.mapper.CourseTemplateMapper;
 import com.ohc.groupclass.course.mapper.VenueMapper;
+import com.ohc.groupclass.enrollment.dto.StockVO;
+import com.ohc.groupclass.enrollment.service.StockService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +44,7 @@ public class MemberClassService {
     private final CourseTemplateMapper courseTemplateMapper;
     private final VenueMapper venueMapper;
     private final CoachProfileMapper coachProfileMapper;
+    private final StockService stockService;
 
     public List<MemberClassVO> listOpen(String keyword) {
         LocalDateTime now = LocalDateTime.now();
@@ -85,6 +91,7 @@ public class MemberClassService {
         }));
         Map<Long, String> coachNames = loadCoachNames(coachIds);
         Map<Long, String> venueNames = loadVenueNames(venueIds);
+        Map<Long, Integer> remainingMap = loadRemaining(classIds);
 
         return classes.stream().map(item -> {
             CourseTemplate template = templateMap.get(item.getTemplateId());
@@ -113,11 +120,39 @@ public class MemberClassService {
                     item.getEndTime(),
                     item.getTotalSessions(),
                     item.getCapacity(),
+                    remainingMap.get(item.getId()),
                     item.getPrice(),
                     item.getEnrollOpenTime(),
                     item.getEnrollCloseTime(),
                     sessions);
         }).toList();
+    }
+
+    public StockVO getStock(Long classId) {
+        ClassInfo classInfo = classInfoMapper.selectById(classId);
+        if (classInfo == null) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "班级不存在");
+        }
+        Integer remaining = stockService.remaining(classId);
+        if (remaining == null) {
+            remaining = stockService.rebuild(classId);
+        }
+        return new StockVO(classId, classInfo.getCapacity(),
+                Math.max(0, classInfo.getCapacity() - remaining), remaining);
+    }
+
+    private Map<Long, Integer> loadRemaining(List<Long> classIds) {
+        try {
+            Map<Long, Integer> result = new HashMap<>(stockService.remainingBatch(classIds));
+            for (Long classId : classIds) {
+                if (!result.containsKey(classId)) {
+                    result.put(classId, stockService.rebuild(classId));
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 
     private Map<Long, String> loadCoachNames(Collection<Long> userIds) {

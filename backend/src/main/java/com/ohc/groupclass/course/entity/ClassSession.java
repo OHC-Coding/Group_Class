@@ -32,6 +32,7 @@ public class ClassSession {
 
     private LocalDateTime checkinExpireAt;
 
+    @TableField(updateStrategy = FieldStrategy.NEVER)
     private String status;
 
     @TableField(updateStrategy = FieldStrategy.NEVER)

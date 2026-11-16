@@ -4,6 +4,7 @@ import com.ohc.groupclass.common.Result;
 import com.ohc.groupclass.course.dto.ClassCreateRequest;
 import com.ohc.groupclass.course.dto.ClassUpdateRequest;
 import com.ohc.groupclass.course.dto.ClassVO;
+import com.ohc.groupclass.course.dto.SessionAdjustRequest;
 import com.ohc.groupclass.course.service.ClassService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -57,5 +58,17 @@ public class AdminClassController {
     @PutMapping("/{id}/cancel")
     public Result<ClassVO> cancel(@PathVariable Long id) {
         return Result.ok(classService.cancel(id));
+    }
+
+    @PutMapping("/{id}/sessions/{sessionId}")
+    public Result<ClassVO> adjustSession(@PathVariable Long id,
+                                         @PathVariable Long sessionId,
+                                         @Valid @RequestBody SessionAdjustRequest request) {
+        return Result.ok(classService.adjustSession(id, sessionId, request));
+    }
+
+    @PutMapping("/{id}/sessions/{sessionId}/cancel")
+    public Result<ClassVO> cancelSession(@PathVariable Long id, @PathVariable Long sessionId) {
+        return Result.ok(classService.cancelSession(id, sessionId));
     }
 }

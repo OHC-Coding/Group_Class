@@ -10,6 +10,7 @@ import com.ohc.groupclass.course.dto.ClassCreateRequest;
 import com.ohc.groupclass.course.dto.ClassSessionVO;
 import com.ohc.groupclass.course.dto.ClassUpdateRequest;
 import com.ohc.groupclass.course.dto.ClassVO;
+import com.ohc.groupclass.course.dto.SessionAdjustRequest;
 import com.ohc.groupclass.course.dto.SessionItem;
 import com.ohc.groupclass.course.entity.ClassInfo;
 import com.ohc.groupclass.course.entity.ClassSession;
@@ -91,7 +92,7 @@ public class ClassService {
 
         List<ResolvedSession> sessions = resolveSessions(
                 request.getSessions(), request.getVenueId(), request.getCoachId());
-        checkScheduleConflict(null, sessions);
+        checkScheduleConflict(null, null, sessions);
 
         ClassInfo entity = new ClassInfo();
         entity.setTemplateId(template.getId());
@@ -99,6 +100,7 @@ public class ClassService {
         entity.setCoachId(request.getCoachId());
         entity.setVenueId(request.getVenueId());
         fillSchedule(entity, sessions);
+        entity.setTotalSessions(sessions.size());
         entity.setCapacity(request.getCapacity());
         entity.setPrice(request.getPrice());
         entity.setCoachUnitPrice(request.getCoachUnitPrice() == null
@@ -135,7 +137,7 @@ public class ClassService {
 
         List<ResolvedSession> sessions = resolveSessions(
                 request.getSessions(), request.getVenueId(), request.getCoachId());
-        checkScheduleConflict(id, sessions);
+        checkScheduleConflict(id, null, sessions);
 
         List<ClassSession> existing = listSessions(id, true);
         if (current == ClassStatus.OPEN && existing.size() != sessions.size()) {
@@ -147,6 +149,9 @@ public class ClassService {
         entity.setCoachId(request.getCoachId());
         entity.setVenueId(request.getVenueId());
         fillSchedule(entity, sessions);
+        if (current == ClassStatus.DRAFT) {
+            entity.setTotalSessions(sessions.size());
+        }
         entity.setCapacity(request.getCapacity());
         entity.setPrice(request.getPrice());
         entity.setCoachUnitPrice(request.getCoachUnitPrice() == null
@@ -187,6 +192,86 @@ public class ClassService {
         requireClass(id);
         classStatusService.transition(id, ClassStatus.CANCELLED);
         return getById(id);
+    }
+
+    @Transactional
+    public ClassVO adjustSession(Long classId, Long sessionId, SessionAdjustRequest request) {
+        ClassInfo entity = requireClass(classId);
+        ClassStatus status = ClassStatus.of(entity.getStatus());
+        if (status == ClassStatus.FINISHED || status == ClassStatus.CANCELLED) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "已结束或已取消的班级不能调课");
+        }
+
+        ClassSession session = requireSession(classId, sessionId);
+        if (!SESSION_NORMAL.equals(session.getStatus())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "只有正常课次可以调课");
+        }
+        if (!session.getStartTime().isAfter(LocalDateTime.now())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "已开始的课次不能调课");
+        }
+        if (!request.getStartTime().isBefore(request.getEndTime())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "课次结束时间必须晚于开始时间");
+        }
+        if (!LocalDateTime.of(request.getDate(), request.getStartTime()).isAfter(LocalDateTime.now())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "调课后的上课时间必须晚于当前时间");
+        }
+        boolean sameDay = listSessions(classId, true).stream()
+                .anyMatch(other -> !Objects.equals(other.getId(), sessionId)
+                        && other.getStartTime().toLocalDate().equals(request.getDate()));
+        if (sameDay) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "同一天只能安排一节课：" + request.getDate());
+        }
+
+        Long venueId = request.getVenueId() == null ? session.getVenueId() : request.getVenueId();
+        Long coachId = request.getCoachId() == null
+                ? (session.getCoachId() == null ? entity.getCoachId() : session.getCoachId())
+                : request.getCoachId();
+        requireVenue(venueId);
+        requireCoach(coachId);
+
+        ResolvedSession resolved = new ResolvedSession(
+                request.getDate(), request.getStartTime(), request.getEndTime(), venueId, coachId);
+        checkScheduleConflict(null, sessionId, List.of(resolved));
+
+        session.setStartTime(resolved.startDateTime());
+        session.setEndTime(resolved.endDateTime());
+        session.setVenueId(venueId);
+        session.setCoachId(Objects.equals(coachId, entity.getCoachId()) ? null : coachId);
+        classSessionMapper.updateById(session);
+
+        refreshClassSchedule(entity);
+        return getById(classId);
+    }
+
+    @Transactional
+    public ClassVO cancelSession(Long classId, Long sessionId) {
+        ClassInfo entity = requireClass(classId);
+        ClassStatus status = ClassStatus.of(entity.getStatus());
+        if (status == ClassStatus.FINISHED || status == ClassStatus.CANCELLED) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "已结束或已取消的班级不能停课");
+        }
+
+        ClassSession session = requireSession(classId, sessionId);
+        if (!SESSION_NORMAL.equals(session.getStatus())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "只有正常课次可以停课");
+        }
+        if (!session.getStartTime().isAfter(LocalDateTime.now())) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "已开始的课次不能停课");
+        }
+        if (listSessions(classId, true).size() <= 1) {
+            throw new BusinessException(ResultCode.BAD_REQUEST, "至少保留一节正常课次，整班不上请取消班级");
+        }
+
+        int affected = classSessionMapper.update(null, Wrappers.<ClassSession>lambdaUpdate()
+                .eq(ClassSession::getId, session.getId())
+                .eq(ClassSession::getStatus, SESSION_NORMAL)
+                .set(ClassSession::getStatus, SESSION_CANCELLED));
+        if (affected == 0) {
+            throw new BusinessException(ResultCode.CONFLICT, "课次状态已变化，请刷新后重试");
+        }
+
+        refreshClassSchedule(entity);
+        return getById(classId);
     }
 
     public ClassInfo requireClass(Long id) {
@@ -272,7 +357,8 @@ public class ClassService {
         return result;
     }
 
-    private void checkScheduleConflict(Long excludeClassId, List<ResolvedSession> sessions) {
+    private void checkScheduleConflict(Long excludeClassId, Long excludeSessionId,
+                                       List<ResolvedSession> sessions) {
         LocalDateTime rangeStart = sessions.stream()
                 .map(ResolvedSession::startDateTime).min(LocalDateTime::compareTo).orElseThrow();
         LocalDateTime rangeEnd = sessions.stream()
@@ -296,6 +382,9 @@ public class ClassService {
                 .collect(Collectors.toMap(ClassInfo::getId, Function.identity()));
 
         for (ClassSession candidate : candidates) {
+            if (excludeSessionId != null && excludeSessionId.equals(candidate.getId())) {
+                continue;
+            }
             ClassInfo owner = classMap.get(candidate.getClassId());
             if (owner == null) {
                 continue;
@@ -334,7 +423,30 @@ public class ClassService {
         entity.setEndDate(sessions.get(sessions.size() - 1).date());
         entity.setStartTime(first.startTime());
         entity.setEndTime(first.endTime());
-        entity.setTotalSessions(sessions.size());
+    }
+
+    private void refreshClassSchedule(ClassInfo entity) {
+        List<ClassSession> remaining = listSessions(entity.getId(), true);
+        if (remaining.isEmpty()) {
+            return;
+        }
+        ClassSession first = remaining.stream()
+                .min(Comparator.comparing(ClassSession::getStartTime)).orElseThrow();
+        ClassSession last = remaining.stream()
+                .max(Comparator.comparing(ClassSession::getStartTime)).orElseThrow();
+        entity.setStartDate(first.getStartTime().toLocalDate());
+        entity.setEndDate(last.getStartTime().toLocalDate());
+        entity.setStartTime(first.getStartTime().toLocalTime());
+        entity.setEndTime(first.getEndTime().toLocalTime());
+        classInfoMapper.updateById(entity);
+    }
+
+    private ClassSession requireSession(Long classId, Long sessionId) {
+        ClassSession session = classSessionMapper.selectById(sessionId);
+        if (session == null || !Objects.equals(session.getClassId(), classId)) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "课次不存在");
+        }
+        return session;
     }
 
     private void insertClass(ClassInfo entity) {

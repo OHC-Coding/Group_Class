@@ -49,6 +49,7 @@ public class ClassInfo {
 
     private LocalDateTime enrollCloseTime;
 
+    @TableField(updateStrategy = FieldStrategy.NEVER)
     private String status;
 
     private String remark;

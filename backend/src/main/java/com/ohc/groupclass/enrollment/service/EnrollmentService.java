@@ -142,7 +142,10 @@ public class EnrollmentService {
         if (!EnrollmentStatus.PENDING_PAYMENT.name().equals(enrollment.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "只有待支付的报名可以取消");
         }
-        orderService.closeByEnrollment(enrollmentId);
+        int closed = orderService.closeByEnrollment(enrollmentId);
+        if (closed == 0 && orderService.isPaidByEnrollment(enrollmentId)) {
+            throw new BusinessException(ResultCode.CONFLICT, "订单已支付，无法取消");
+        }
         releasePending(enrollmentId, memberId);
     }
 

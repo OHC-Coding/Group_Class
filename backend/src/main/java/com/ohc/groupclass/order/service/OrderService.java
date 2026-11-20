@@ -80,6 +80,20 @@ public class OrderService {
                 .set(PaymentOrder::getStatus, "CLOSED"));
     }
 
+    public PaymentOrder requireById(Long orderId) {
+        PaymentOrder order = paymentOrderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "订单不存在");
+        }
+        return order;
+    }
+
+    public boolean isPaidByEnrollment(Long enrollmentId) {
+        return paymentOrderMapper.exists(Wrappers.<PaymentOrder>lambdaQuery()
+                .eq(PaymentOrder::getEnrollmentId, enrollmentId)
+                .eq(PaymentOrder::getStatus, "PAID"));
+    }
+
     public List<PaymentOrder> findExpired(LocalDateTime now, int limit) {
         return paymentOrderMapper.selectExpired(now, limit);
     }

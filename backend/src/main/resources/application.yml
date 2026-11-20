@@ -37,6 +37,9 @@ group-class:
     expire-minutes: 120
   enroll:
     pay-timeout-minutes: 15
+  payment:
+    mock:
+      secret: ${MOCK_PAY_SECRET:group-class-mock-pay-secret}
   schedule:
     auto-transition-ms: 60000
     order-timeout-ms: 60000

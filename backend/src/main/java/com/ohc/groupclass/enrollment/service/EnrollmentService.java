@@ -17,6 +17,7 @@ import com.ohc.groupclass.enrollment.dto.StockVO;
 import com.ohc.groupclass.enrollment.entity.Enrollment;
 import com.ohc.groupclass.enrollment.enums.EnrollmentStatus;
 import com.ohc.groupclass.enrollment.mapper.EnrollmentMapper;
+import com.ohc.groupclass.order.service.OrderService;
 import com.ohc.groupclass.user.entity.SysUser;
 import com.ohc.groupclass.user.mapper.SysUserMapper;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.util.Collection;
@@ -45,6 +47,8 @@ public class EnrollmentService {
     private final CoachProfileMapper coachProfileMapper;
     private final SysUserMapper sysUserMapper;
     private final StockService stockService;
+    private final OrderService orderService;
+    private final TransactionTemplate transactionTemplate;
 
     /**
      * 抢位顺序：先校验 → Redis 原子扣减 → 落库；落库失败补偿 Redis。
@@ -97,35 +101,11 @@ public class EnrollmentService {
 
         Enrollment saved;
         try {
-            if (existing == null) {
-                saved = new Enrollment();
-                saved.setClassId(classId);
-                saved.setMemberId(memberId);
-                saved.setStatus(EnrollmentStatus.PENDING_PAYMENT.name());
-                saved.setEnrollTime(now);
-                enrollmentMapper.insert(saved);
-            } else {
-                int affected = enrollmentMapper.update(null, Wrappers.<Enrollment>lambdaUpdate()
-                        .eq(Enrollment::getId, existing.getId())
-                        .in(Enrollment::getStatus,
-                                EnrollmentStatus.CANCELLED.name(),
-                                EnrollmentStatus.REFUNDED.name())
-                        .set(Enrollment::getStatus, EnrollmentStatus.PENDING_PAYMENT.name())
-                        .set(Enrollment::getEnrollTime, now)
-                        .set(Enrollment::getCancelTime, null));
-                if (affected == 0) {
-                    stockService.compensate(classId, memberId);
-                    Enrollment latest = enrollmentMapper.selectById(existing.getId());
-                    if (latest != null && isOccupying(latest.getStatus())) {
-                        return toResult(latest);
-                    }
-                    throw new BusinessException(ResultCode.CONFLICT, "报名状态已变化，请刷新后重试");
-                }
-                saved = existing;
-                saved.setStatus(EnrollmentStatus.PENDING_PAYMENT.name());
-                saved.setEnrollTime(now);
-                saved.setCancelTime(null);
-            }
+            saved = transactionTemplate.execute(status -> {
+                Enrollment row = writeEnrollment(existing, classId, memberId, now);
+                orderService.create(row.getId(), memberId, classInfo.getPrice());
+                return row;
+            });
         } catch (DuplicateKeyException e) {
             stockService.compensate(classId, memberId);
             Enrollment latest = findByClassAndMember(classId, memberId);
@@ -134,6 +114,11 @@ public class EnrollmentService {
             }
             throw new BusinessException(ResultCode.CONFLICT, "报名冲突，请重试");
         } catch (BusinessException e) {
+            stockService.compensate(classId, memberId);
+            Enrollment latest = findByClassAndMember(classId, memberId);
+            if (latest != null && isOccupying(latest.getStatus())) {
+                return toResult(latest);
+            }
             throw e;
         } catch (RuntimeException e) {
             stockService.compensate(classId, memberId);
@@ -143,7 +128,7 @@ public class EnrollmentService {
     }
 
     /**
-     * 取消顺序：先条件更新数据库，影响 1 行才回补 Redis，重复取消不会重复加名额。
+     * 取消顺序：关订单 → 条件更新报名 → 影响 1 行才回补 Redis，重复取消不会重复加名额。
      */
     public void cancel(Long enrollmentId, Long memberId) {
         Enrollment enrollment = enrollmentMapper.selectById(enrollmentId);
@@ -151,26 +136,67 @@ public class EnrollmentService {
             throw new BusinessException(ResultCode.NOT_FOUND, "报名不存在");
         }
         if (EnrollmentStatus.CANCELLED.name().equals(enrollment.getStatus())) {
+            orderService.closeByEnrollment(enrollmentId);
             return;
         }
         if (!EnrollmentStatus.PENDING_PAYMENT.name().equals(enrollment.getStatus())) {
             throw new BusinessException(ResultCode.BAD_REQUEST, "只有待支付的报名可以取消");
         }
+        orderService.closeByEnrollment(enrollmentId);
+        releasePending(enrollmentId, memberId);
+    }
 
+    /**
+     * 超时关单后作废报名：订单已由定时任务关掉，这里只改报名状态并释放名额。
+     * 报名状态是释放名额的唯一门闩，重复调用不会重复加名额。
+     */
+    public void cancelExpired(Long enrollmentId, Long memberId) {
+        releasePending(enrollmentId, memberId);
+    }
+
+    private Enrollment writeEnrollment(Enrollment existing, Long classId, Long memberId,
+                                       LocalDateTime now) {
+        if (existing != null) {
+            int affected = enrollmentMapper.update(null, Wrappers.<Enrollment>lambdaUpdate()
+                    .eq(Enrollment::getId, existing.getId())
+                    .in(Enrollment::getStatus,
+                            EnrollmentStatus.CANCELLED.name(),
+                            EnrollmentStatus.REFUNDED.name())
+                    .set(Enrollment::getStatus, EnrollmentStatus.PENDING_PAYMENT.name())
+                    .set(Enrollment::getEnrollTime, now)
+                    .set(Enrollment::getCancelTime, null));
+            if (affected == 0) {
+                throw new BusinessException(ResultCode.CONFLICT, "报名状态已变化，请刷新后重试");
+            }
+            existing.setStatus(EnrollmentStatus.PENDING_PAYMENT.name());
+            existing.setEnrollTime(now);
+            existing.setCancelTime(null);
+            return existing;
+        }
+        Enrollment row = new Enrollment();
+        row.setClassId(classId);
+        row.setMemberId(memberId);
+        row.setStatus(EnrollmentStatus.PENDING_PAYMENT.name());
+        row.setEnrollTime(now);
+        enrollmentMapper.insert(row);
+        return row;
+    }
+
+    private void releasePending(Long enrollmentId, Long memberId) {
+        Enrollment enrollment = enrollmentMapper.selectById(enrollmentId);
+        if (enrollment == null
+                || !EnrollmentStatus.PENDING_PAYMENT.name().equals(enrollment.getStatus())) {
+            return;
+        }
         int affected = enrollmentMapper.update(null, Wrappers.<Enrollment>lambdaUpdate()
                 .eq(Enrollment::getId, enrollmentId)
                 .eq(Enrollment::getMemberId, memberId)
                 .eq(Enrollment::getStatus, EnrollmentStatus.PENDING_PAYMENT.name())
                 .set(Enrollment::getStatus, EnrollmentStatus.CANCELLED.name())
                 .set(Enrollment::getCancelTime, LocalDateTime.now()));
-        if (affected == 0) {
-            Enrollment latest = enrollmentMapper.selectById(enrollmentId);
-            if (latest != null && EnrollmentStatus.CANCELLED.name().equals(latest.getStatus())) {
-                return;
-            }
-            throw new BusinessException(ResultCode.CONFLICT, "报名状态已变化，请刷新后重试");
+        if (affected == 1) {
+            stockService.release(enrollment.getClassId(), memberId);
         }
-        stockService.release(enrollment.getClassId(), memberId);
     }
 
     public List<MyEnrollmentVO> listMine(Long memberId) {

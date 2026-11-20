@@ -37,3 +37,6 @@ group-class:
     expire-minutes: 120
   enroll:
     pay-timeout-minutes: 15
+  schedule:
+    auto-transition-ms: 60000
+    order-timeout-ms: 60000

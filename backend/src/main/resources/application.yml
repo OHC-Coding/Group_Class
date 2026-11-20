@@ -43,3 +43,4 @@ group-class:
   schedule:
     auto-transition-ms: 60000
     order-timeout-ms: 60000
+    reconcile-cron: 0 0 2 * * *
